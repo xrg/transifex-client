@@ -327,7 +327,7 @@ def cmd_push(argv, path_to_tx):
 
     prj.push(
         force=force_creation, resources=resources, languages=languages,
-        skip=skip, source=options.push_source,
+        skip=skip, source=options.push_source, num=options.num,
         translations=options.push_translations,
         no_interactive=options.no_interactive
     )

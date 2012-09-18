@@ -141,6 +141,8 @@ def push_parser():
         " files concurrently.")
     parser.add_option("-s", "--source", action="store_true", dest="push_source",
         default=False, help="Push the source file to the server.")
+    parser.add_option("-n", "--num", action="store", dest="num",
+        default=False, help="Only push up to num files to the server.")
 
     parser.add_option("-t", "--translations", action="store_true", dest="push_translations",
         default=False, help="Push the translation files to the server")

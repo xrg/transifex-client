@@ -21,6 +21,8 @@ from txclib.processors import visit_hostname
 class ProjectNotInit(Exception):
     pass
 
+class RemoteException(Exception):
+    pass
 
 class Project(object):
     """
@@ -492,13 +494,17 @@ class Project(object):
                     fd.close()
 
     def push(self, source=False, translations=False, force=False, resources=[], languages=[],
-        skip=False, no_interactive=False):
+        num=False, skip=False, no_interactive=False):
         """
         Push all the resources
         """
         resource_list = self.get_chosen_resources(resources)
         self.skip = skip
         self.force = force
+        if num:
+            num = int(num)
+        counter=0
+
         for resource in resource_list:
             push_languages = []
             project_slug, resource_slug = resource.split('.')
@@ -528,6 +534,9 @@ class Project(object):
                 if not answer in ["", 'Y', 'y', "yes", 'YES']:
                     return
 
+            if num and counter >= num:
+                break
+
             if source:
                 if sfile == None:
                     logger.error("You don't seem to have a proper source file"
@@ -550,6 +559,7 @@ class Project(object):
                                 , self.get_full_path(sfile)
                         )],
                     )
+                    counter += 1
                 except Exception, e:
                     if not skip:
                         raise
@@ -558,6 +568,7 @@ class Project(object):
             else:
                 try:
                     self.do_url_request('resource_details')
+                    counter += 1
                 except Exception, e:
                     code = getattr(e, 'code', None)
                     if code == 404:
@@ -601,6 +612,8 @@ class Project(object):
                         msg = "Skipping '%s' translation (file: %s)."
                         logger.info(msg % (color_text(lang, "RED"), local_file))
                         continue
+                    if num and counter >= num:
+                        break
 
                     msg = "Pushing '%s' translations (file: %s)"
                     logger.warning(
@@ -615,6 +628,7 @@ class Project(object):
                             )], language=remote_lang
                         )
                         logger.debug("Translation %s pushed." % remote_lang)
+                        counter += 1
                     except Exception, e:
                         if not skip:
                             raise e
@@ -786,10 +800,10 @@ class Project(object):
                 return None
             else:
                 # For other requests, we should print the message as well
-                raise Exception("Remote server replied: %s" % e.read())
+                raise RemoteException("Remote server replied: %s" % e.read())
         except urllib2.URLError, e:
             error = e.args[0]
-            raise Exception("Remote server replied: %s" % error[1])
+            raise RemoteException("Remote server replied: %s" % error[1])
 
 
     def _should_update_translation(self, lang, stats, local_file, force=False,
