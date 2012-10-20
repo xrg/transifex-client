@@ -8,6 +8,7 @@ import fnmatch
 import urllib2
 import datetime, time
 import ConfigParser
+import subprocess
 
 from txclib.web import *
 from txclib.utils import *
@@ -35,6 +36,7 @@ class Project(object):
         """
         if init:
             self._init(path_to_tx)
+        self._git_dirs_cache = {}
 
     def _init(self, path_to_tx=None):
         instructions = "Run 'tx init' to initialize your project first!"
@@ -930,9 +932,59 @@ class Project(object):
         Returns:
             The time as a timestamp or None, if the file does not exist
         """
+        time_format = "%Y-%m-%d %H:%M:%S %Z"
         if not os.path.exists(path):
             return None
+        try:
+            rtype, git_dir, fname = self._get_git_dir(path)
+            assert rtype == 'git', rtype
+            # FIXME: requires python 2.7!
+            out = subprocess.check_output(['git', 'rev-list', '-n', '1',
+                        '--pretty=format:%at', 'HEAD', '--', fname], cwd=git_dir)
+            if out:
+                lines = out.split('\n')
+                return float(lines[1])
+        except KeyError:
+            # It's not a git dir!
+            pass
+        except Exception, e:
+            logger.warning("Cannot check with git:", exc_info=True)
         return time.mktime(time.gmtime(os.path.getmtime(path)))
+
+    def _get_git_dir(self, path):
+        """Check if path lies within a git directory, and return that
+
+            Args:
+                path a complete filepath
+            Returns:
+                (<repotype>, dirname, basename)
+        """
+        d, t = os.path.split(path)
+        h = d
+
+        while h:
+            if h in ('/', '/home', '/net'):
+                # don't even try these!
+                break
+            # rQ : are we allowed to go up from self.root ?
+
+            hit = self._git_dirs_cache.get(h,None)
+            if hit is False:
+                # /negative/ cache
+                raise KeyError(h)
+            elif hit is None:
+                # not cached, we must check further
+                if os.path.isdir(os.path.join(h, '.git')):
+                    hit = 'git'
+                if hit:
+                    self._git_dirs_cache[h] = hit
+            if hit:
+                logger.debug("Hit!, %s is a %s dir", h, hit)
+                return hit, d, t
+            else:
+                h = os.path.split(h)[0]
+        
+        raise KeyError(d)
 
     def _satisfies_min_translated(self, stats, mode=None):
         """Check whether a translation fulfills the filter used for
