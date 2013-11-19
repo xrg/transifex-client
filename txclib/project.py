@@ -1,15 +1,16 @@
+
 # -*- coding: utf-8 -*-
+
 import base64
-import copy
 import getpass
 import os
 import re
 import fnmatch
 import urllib2
-import datetime, time
+import datetime
+import time
 import ConfigParser
 import subprocess
-
 from txclib.web import *
 from txclib.utils import *
 from txclib.urls import API_URLS
@@ -17,6 +18,7 @@ from txclib.config import OrderedRawConfigParser, Flipdict
 from txclib.log import logger
 from txclib.http_utils import http_response
 from txclib.processors import visit_hostname
+from txclib.paths import posix_path, native_path, posix_sep
 
 
 class ProjectNotInit(Exception):
@@ -45,7 +47,10 @@ class Project(object):
             self.config_file = self._get_config_file_path(self.root)
             self.config = self._read_config_file(self.config_file)
             self.txrc_file = self._get_transifex_file()
-            self.txrc = self._get_transifex_config(self.txrc_file)
+            local_txrc_file = self._get_transifex_file(os.getcwd())
+            self.txrc = self._get_transifex_config([self.txrc_file, local_txrc_file])
+            if os.path.exists(local_txrc_file):
+                self.txrc_file = local_txrc_file
         except ProjectNotInit, e:
             logger.error('\n'.join([unicode(e), instructions]))
             raise
@@ -78,19 +83,21 @@ class Project(object):
             raise ProjectNotInit(msg)
         return config
 
-    def _get_transifex_config(self, txrc_file):
-        """Read the configuration from the .transifexrc file."""
+    def _get_transifex_config(self, txrc_files):
+        """Read the configuration from the .transifexrc files."""
         txrc = OrderedRawConfigParser()
         try:
-            txrc.read(txrc_file)
+            txrc.read(txrc_files)
         except Exception, e:
-            msg = "Cannot read global configuration file: %s" % e
+            msg = "Cannot read configuration file: %s" % e
             raise ProjectNotInit(msg)
         self._migrate_txrc_file(txrc)
         return txrc
 
     def _migrate_txrc_file(self, txrc):
         """Migrate the txrc file, if needed."""
+        if not os.path.exists(self.txrc_file):
+            return txrc
         for section in txrc.sections():
             orig_hostname = txrc.get(section, 'hostname')
             hostname = visit_hostname(orig_hostname)
@@ -110,14 +117,17 @@ class Project(object):
     def _get_transifex_file(self, directory=None):
         """Fetch the path of the .transifexrc file.
 
-        It is in the home directory ofthe user by default.
+        It is in the home directory of the user by default.
         """
-        if directory is None:
-            directory = os.path.expanduser('~')
+        if directory is not None:
+            logger.debug(".transifexrc file is at %s" % directory)
+            return os.path.join(directory, ".transifexrc")
+
+        directory = os.path.expanduser('~')
         txrc_file = os.path.join(directory, ".transifexrc")
         logger.debug(".transifexrc file is at %s" % directory)
         if not os.path.exists(txrc_file):
-            msg = "No authentication data found."
+            msg = "%s not found." % (txrc_file)
             logger.info(msg)
             mask = os.umask(077)
             open(txrc_file, 'w').close()
@@ -158,14 +168,12 @@ class Project(object):
 
     def set_remote_resource(self, resource, source_lang, i18n_type, host,
             file_filter="translations<sep>%(proj)s.%(res)s<sep><lang>.%(extension)s"):
-        """
-        Method to handle the add/conf of a remote resource.
-        """
+        """Method to handle the add/conf of a remote resource."""
         if not self.config.has_section(resource):
             self.config.add_section(resource)
 
         p_slug, r_slug = resource.split('.')
-        file_filter = file_filter.replace("<sep>", r"%s" % os.path.sep)
+        file_filter = file_filter.replace("<sep>", r"%s" % posix_sep)
         self.url_info = {
             'host': host,
             'project': p_slug,
@@ -178,6 +186,7 @@ class Project(object):
             resource, 'file_filter',
             file_filter % {'proj': p_slug, 'res': r_slug, 'extension': extension}
         )
+        self.config.set(resource, 'type', i18n_type)
         if host != self.config.get('main', 'host'):
             self.config.set(resource, 'host', host)
 
@@ -191,9 +200,7 @@ class Project(object):
         return self.config.get('main', 'host')
 
     def get_resource_lang_mapping(self, resource):
-        """
-        Get language mappings for a specific resource.
-        """
+        """Get language mappings for a specific resource."""
         lang_map = Flipdict()
         try:
             args = self.config.get("main", "lang_map")
@@ -222,6 +229,24 @@ class Project(object):
 
         return lang_map
 
+    def get_source_file(self, resource):
+        """
+        Get source file for a resource.
+        """
+        if self.config.has_section(resource):
+            source_lang = self.config.get(resource, "source_lang")
+            source_file = self.get_resource_option(resource, 'source_file') or None
+
+            if source_file is None:
+                try:
+                    file_filter = self.config.get(resource, "file_filter")
+                    filename = file_filter.replace('<lang>', source_lang)
+                    if os.path.exists(filename):
+                        return native_path(filename)
+                except ConfigParser.NoOptionError:
+                    pass
+            else:
+                return native_path(source_file)
 
     def get_resource_files(self, resource):
         """
@@ -240,22 +265,21 @@ class Project(object):
             except ConfigParser.NoOptionError:
                 file_filter = "$^"
             source_lang = self.config.get(resource, "source_lang")
-            source_file = self.get_resource_option(resource, 'source_file') or None
+            source_file = self.get_source_file(resource)
             expr_re = regex_from_filefilter(file_filter, self.root)
             expr_rec = re.compile(expr_re)
-            for root, dirs, files in os.walk(self.root):
-                for f in files:
-                    f_path = os.path.abspath(os.path.join(root, f))
-                    match = expr_rec.match(f_path)
-                    if match:
-                        lang = match.group(1)
-                        if lang != source_lang:
-                            f_path = relpath(f_path, self.root)
-                            if f_path != source_file:
-                                tr_files.update({lang: f_path})
+            for f_path in files_in_project(self.root):
+                match = expr_rec.match(posix_path(f_path))
+                if match:
+                    lang = match.group(1)
+                    if lang != source_lang:
+                        f_path = os.path.relpath(f_path, self.root)
+                        if f_path != source_file:
+                            tr_files.update({lang: f_path})
 
             for (name, value) in self.config.items(resource):
                 if name.startswith("trans."):
+                    value = native_path(value)
                     lang = name.split('.')[1]
                     # delete language which has same file
                     if value in tr_files.values():
@@ -332,7 +356,7 @@ class Project(object):
         os.umask(mask)
 
     def get_full_path(self, relpath):
-        if relpath[0] == "/":
+        if relpath[0] == os.path.sep:
             return relpath
         else:
             return os.path.join(self.root, relpath)
@@ -358,9 +382,10 @@ class Project(object):
             project_slug, resource_slug = resource.split('.')
             files = self.get_resource_files(resource)
             slang = self.get_resource_option(resource, 'source_lang')
-            sfile = self.get_resource_option(resource, 'source_file')
+            sfile = self.get_source_file(resource)
             lang_map = self.get_resource_lang_mapping(resource)
             host = self.get_resource_host(resource)
+            verify_ssl(host)
             logger.debug("Language mapping is: %s" % lang_map)
             if mode is None:
                 mode = self._get_option(resource, 'mode')
@@ -372,7 +397,6 @@ class Project(object):
             logger.debug("URL data are: %s" % self.url_info)
 
             stats = self._get_stats_for_resource()
-
 
             try:
                 file_filter = self.config.get(resource, 'file_filter')
@@ -467,13 +491,18 @@ class Project(object):
                         local_lang = lang
                     remote_lang = lang
                     if file_filter:
-                        local_file = relpath(os.path.join(self.root,
-                            file_filter.replace('<lang>', local_lang)), os.curdir)
+                        local_file = os.path.relpath(
+                            os.path.join(
+                                self.root, native_path(
+                                    file_filter.replace('<lang>', local_lang)
+                                )
+                            ), os.curdir
+                        )
                     else:
                         trans_dir = os.path.join(self.root, ".tx", resource)
                         if not os.path.exists(trans_dir):
                             os.mkdir(trans_dir)
-                        local_file = relpath(os.path.join(trans_dir, '%s_translation' %
+                        local_file = os.path.relpath(os.path.join(trans_dir, '%s_translation' %
                             local_lang, os.curdir))
 
                     if lang != slang:
@@ -512,9 +541,10 @@ class Project(object):
             project_slug, resource_slug = resource.split('.')
             files = self.get_resource_files(resource)
             slang = self.get_resource_option(resource, 'source_lang')
-            sfile = self.get_resource_option(resource, 'source_file')
+            sfile = self.get_source_file(resource)
             lang_map = self.get_resource_lang_mapping(resource)
             host = self.get_resource_host(resource)
+            verify_ssl(host)
             logger.debug("Language mapping is: %s" % lang_map)
             logger.debug("Using host %s" % host)
             self.url_info = {
@@ -540,7 +570,7 @@ class Project(object):
                 break
 
             if source:
-                if sfile == None:
+                if sfile is None:
                     logger.error("You don't seem to have a proper source file"
                         " mapping for resource %s. Try without the --source"
                         " option or set a source file first and then try again." %
@@ -651,6 +681,7 @@ class Project(object):
         for resource in resource_list:
             project_slug, resource_slug = resource.split('.')
             host = self.get_resource_host(resource)
+            verify_ssl(host)
             self.url_info = {
                 'host': host,
                 'project': project_slug,
